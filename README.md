@@ -39,6 +39,9 @@ No Supabase setup required for local dev — it uses in-memory storage automatic
 2. Before deploying, add **Environment Variables**:
    - `SUPABASE_URL` = your project URL
    - `SUPABASE_SERVICE_ROLE_KEY` = your service role key
+   
+   If Vercel's Supabase integration already created variables named
+   `STORAGE_SUPABASE_URL` and `STORAGE_SUPABASE_SERVICE_ROLE_KEY`, those work too.
 3. Click **Deploy**.
 
 Every push to `main` auto-deploys if the repo is linked to Vercel.
