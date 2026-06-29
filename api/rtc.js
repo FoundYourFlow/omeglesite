@@ -1,4 +1,4 @@
-const { matchmake, leave, signal, poll } = require("../lib/matchmaker");
+const { matchmake, leave, signal, chat, poll } = require("../lib/matchmaker");
 const store = require("../lib/store");
 
 async function readBody(req) {
@@ -54,6 +54,11 @@ module.exports = async (req, res) => {
       case "signal": {
         await signal(id, body.data);
         res.status(200).json({ ok: true });
+        return;
+      }
+      case "chat": {
+        const ok = await chat(id, body.text);
+        res.status(200).json({ ok });
         return;
       }
       case "leave": {

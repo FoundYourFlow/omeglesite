@@ -8,6 +8,8 @@ const statusEl = document.getElementById("status");
 const statusText = document.getElementById("status-text");
 const networkBanner = document.getElementById("network-banner");
 const networkUrls = document.getElementById("network-urls");
+const waitingBanner = document.getElementById("waiting-banner");
+const waitingText = document.getElementById("waiting-text");
 const chatMessages = document.getElementById("chat-messages");
 const chatForm = document.getElementById("chat-form");
 const chatInput = document.getElementById("chat-input");
@@ -25,22 +27,23 @@ const clientId =
 
 let localStream = null;
 let peerConnection = null;
-let dataChannel = null;
 let pendingCandidates = [];
 let remoteDescSet = false;
+let makingOffer = false;
 
 let isMuted = false;
 let isCameraOff = false;
 let started = false;
 let isMatched = false;
-let polling = false;
+let isWaiting = false;
+let pollTimer = null;
 let typingTimeout = null;
+let sessionId = 0;
 
 const ICE_SERVERS = {
   iceServers: [
     { urls: "stun:stun.l.google.com:19302" },
     { urls: "stun:stun1.l.google.com:19302" },
-    // Free public TURN (best-effort) helps connect across different networks.
     {
       urls: "turn:openrelay.metered.ca:80",
       username: "openrelayproject",
@@ -54,7 +57,10 @@ const ICE_SERVERS = {
   ],
 };
 
-// ---- Server transport (serverless polling) ----
+const POLL_WAITING_MS = 700;
+const POLL_MATCHED_MS = 250;
+
+// ---- Server transport ----
 async function rtc(action, extra = {}) {
   try {
     const res = await fetch("/api/rtc", {
@@ -70,10 +76,60 @@ async function rtc(action, extra = {}) {
   }
 }
 
+function schedulePoll(delay) {
+  clearTimeout(pollTimer);
+  pollTimer = setTimeout(pollOnce, delay);
+}
+
+async function pollOnce() {
+  if (!started) return;
+  const res = await rtc("poll");
+  if (res) {
+    if (res.status === "waiting") showWaitingRoom(res.waitingCount);
+    else if (res.status === "matched") hideWaitingRoom();
+    if (Array.isArray(res.messages)) {
+      for (const msg of res.messages) {
+        await handleServerMessage(msg);
+      }
+    }
+  }
+  const delay = isMatched ? POLL_MATCHED_MS : POLL_WAITING_MS;
+  schedulePoll(delay);
+}
+
+function startPolling() {
+  clearTimeout(pollTimer);
+  pollOnce();
+}
+
+function stopPolling() {
+  clearTimeout(pollTimer);
+  pollTimer = null;
+}
+
 // ---- UI helpers ----
 function setStatus(state, text) {
   statusEl.className = `status ${state}`;
   statusText.textContent = text;
+}
+
+function showWaitingRoom(count) {
+  isWaiting = true;
+  isMatched = false;
+  waitingBanner.hidden = false;
+  const n = count || 1;
+  waitingText.textContent =
+    n === 1
+      ? "You're the only one waiting. Hang tight — we'll connect you when someone else joins."
+      : `${n} people waiting. You're in the queue — pairing happens two at a time.`;
+  setStatus("waiting", "In waiting room");
+  setControlsEnabled(false);
+  showRemoteOverlay(true, "Waiting for a partner...");
+}
+
+function hideWaitingRoom() {
+  isWaiting = false;
+  waitingBanner.hidden = true;
 }
 
 function addSystemMessage(text) {
@@ -116,111 +172,107 @@ function showRemoteOverlay(show, message) {
   if (message) remoteStatus.textContent = message;
 }
 
-// ---- Media ----
-async function getLocalMedia() {
-  if (localStream) return localStream;
+async function playVideo(el) {
   try {
-    localStream = await navigator.mediaDevices.getUserMedia({
-      video: { width: { ideal: 1280 }, height: { ideal: 720 } },
-      audio: true,
-    });
-    localVideo.srcObject = localStream;
-    return localStream;
-  } catch (err) {
-    console.error("Media error:", err);
-    addSystemMessage("Could not access camera/microphone. Check browser permissions.");
-    setStatus("error", "Camera/mic denied");
-    throw err;
+    await el.play();
+  } catch {
+    // autoplay policies — user gesture already happened on Start
   }
 }
 
+// ---- Media ----
+async function getLocalMedia() {
+  if (localStream) return localStream;
+  localStream = await navigator.mediaDevices.getUserMedia({
+    video: { width: { ideal: 1280 }, height: { ideal: 720 } },
+    audio: true,
+  });
+  localVideo.srcObject = localStream;
+  await playVideo(localVideo);
+  return localStream;
+}
+
+// ---- WebRTC serialization ----
+function serializeSdp(desc) {
+  return { type: desc.type, sdp: desc.sdp };
+}
+
+function serializeCandidate(c) {
+  return {
+    candidate: c.candidate,
+    sdpMid: c.sdpMid,
+    sdpMLineIndex: c.sdpMLineIndex,
+  };
+}
+
+async function sendSignal(data) {
+  await rtc("signal", { data });
+  schedulePoll(POLL_MATCHED_MS);
+}
+
 // ---- WebRTC ----
-function createPeerConnection(initiator) {
+function createPeerConnection(initiator, mySession) {
   peerConnection = new RTCPeerConnection(ICE_SERVERS);
   pendingCandidates = [];
   remoteDescSet = false;
+  makingOffer = false;
 
   localStream.getTracks().forEach((track) => {
     peerConnection.addTrack(track, localStream);
   });
 
   peerConnection.ontrack = (event) => {
-    remoteVideo.srcObject = event.streams[0];
+    if (mySession !== sessionId) return;
+    const stream = event.streams[0] || new MediaStream([event.track]);
+    remoteVideo.srcObject = stream;
+    playVideo(remoteVideo);
     showRemoteOverlay(false);
   };
 
   peerConnection.onicecandidate = (event) => {
+    if (mySession !== sessionId) return;
     if (event.candidate) {
-      rtc("signal", { data: { type: "ice", candidate: event.candidate } });
+      sendSignal({ type: "ice", candidate: serializeCandidate(event.candidate) });
     }
   };
 
   peerConnection.onconnectionstatechange = () => {
-    const state = peerConnection && peerConnection.connectionState;
+    if (mySession !== sessionId || !peerConnection) return;
+    const state = peerConnection.connectionState;
     if (state === "connected") {
       showRemoteOverlay(false);
     } else if (state === "failed") {
-      showRemoteOverlay(true, "Connection failed");
+      showRemoteOverlay(true, "Video connection failed — chat still works");
     }
   };
 
-  if (initiator) {
-    setupDataChannel(peerConnection.createDataChannel("chat"));
-  } else {
-    peerConnection.ondatachannel = (event) => setupDataChannel(event.channel);
-  }
+  peerConnection.oniceconnectionstatechange = () => {
+    if (mySession !== sessionId || !peerConnection) return;
+    const s = peerConnection.iceConnectionState;
+    if (s === "connected" || s === "completed") showRemoteOverlay(false);
+  };
 
   return peerConnection;
 }
 
-function setupDataChannel(channel) {
-  dataChannel = channel;
-  channel.onmessage = (event) => {
-    let msg;
-    try {
-      msg = JSON.parse(event.data);
-    } catch {
-      return;
-    }
-    if (msg.kind === "chat") {
-      addChatMessage(msg.text, "received");
-      typingIndicator.hidden = true;
-    } else if (msg.kind === "typing") {
-      typingIndicator.hidden = !msg.value;
-    }
-  };
-}
-
-function sendOverChannel(obj) {
-  if (dataChannel && dataChannel.readyState === "open") {
-    dataChannel.send(JSON.stringify(obj));
-    return true;
-  }
-  return false;
-}
-
 function cleanupPeerConnection() {
-  if (dataChannel) {
-    try { dataChannel.close(); } catch {}
-    dataChannel = null;
-  }
+  sessionId += 1;
   if (peerConnection) {
+    peerConnection.ontrack = null;
+    peerConnection.onicecandidate = null;
+    peerConnection.onconnectionstatechange = null;
+    peerConnection.oniceconnectionstatechange = null;
     peerConnection.close();
     peerConnection = null;
   }
   remoteVideo.srcObject = null;
   pendingCandidates = [];
   remoteDescSet = false;
-}
-
-async function startAsInitiator() {
-  createPeerConnection(true);
-  const offer = await peerConnection.createOffer();
-  await peerConnection.setLocalDescription(offer);
-  rtc("signal", { data: { type: "offer", sdp: offer } });
+  makingOffer = false;
 }
 
 async function flushCandidates() {
+  if (!peerConnection) return;
   for (const c of pendingCandidates) {
     try {
       await peerConnection.addIceCandidate(c);
@@ -231,8 +283,8 @@ async function flushCandidates() {
   pendingCandidates = [];
 }
 
-async function handleSignal(data) {
-  if (!peerConnection || !data) return;
+async function handleSignal(data, mySession) {
+  if (!peerConnection || mySession !== sessionId || !data) return;
 
   if (data.type === "offer") {
     await peerConnection.setRemoteDescription(data.sdp);
@@ -240,70 +292,94 @@ async function handleSignal(data) {
     await flushCandidates();
     const answer = await peerConnection.createAnswer();
     await peerConnection.setLocalDescription(answer);
-    rtc("signal", { data: { type: "answer", sdp: answer } });
+    await sendSignal({ type: "answer", sdp: serializeSdp(answer) });
   } else if (data.type === "answer") {
     await peerConnection.setRemoteDescription(data.sdp);
     remoteDescSet = true;
     await flushCandidates();
   } else if (data.type === "ice" && data.candidate) {
+    const cand = data.candidate;
     if (remoteDescSet) {
       try {
-        await peerConnection.addIceCandidate(data.candidate);
+        await peerConnection.addIceCandidate(cand);
       } catch (err) {
         console.warn("ICE add error:", err);
       }
     } else {
-      pendingCandidates.push(data.candidate);
+      pendingCandidates.push(cand);
     }
   }
 }
 
-// ---- Matchmaking + polling loop ----
-async function pollLoop() {
-  if (polling) return;
-  polling = true;
-  while (polling) {
-    const res = await rtc("poll");
-    if (res && Array.isArray(res.messages)) {
-      for (const msg of res.messages) {
-        await handleServerMessage(msg);
-      }
-    }
-    await sleep(1200);
-  }
+async function startAsInitiator(mySession) {
+  createPeerConnection(true, mySession);
+  makingOffer = true;
+  const offer = await peerConnection.createOffer({ offerToReceiveAudio: true, offerToReceiveVideo: true });
+  await peerConnection.setLocalDescription(offer);
+  await sendSignal({ type: "offer", sdp: serializeSdp(offer) });
+  makingOffer = false;
 }
 
-function sleep(ms) {
-  return new Promise((r) => setTimeout(r, ms));
+let isConnecting = false;
+
+async function onMatched(initiator) {
+  if (isConnecting || (isMatched && peerConnection)) return;
+  isConnecting = true;
+  try {
+    const mySession = ++sessionId;
+    hideWaitingRoom();
+    isMatched = true;
+    isWaiting = false;
+    setStatus("matched", "Connected to a stranger");
+    setControlsEnabled(true);
+  clearChat();
+  addSystemMessage("You're now chatting with a random stranger. Say hi!");
+  showRemoteOverlay(true, "Connecting video...");
+
+    cleanupPeerConnection();
+    sessionId = mySession;
+
+    if (initiator) {
+      await startAsInitiator(mySession);
+    } else {
+      createPeerConnection(false, mySession);
+    }
+    schedulePoll(POLL_MATCHED_MS);
+  } finally {
+    isConnecting = false;
+  }
 }
 
 async function handleServerMessage(msg) {
   if (!msg || !msg.type) return;
 
-  if (msg.type === "matched") {
-    isMatched = true;
-    setStatus("matched", "Connected to a stranger");
-    setControlsEnabled(true);
-    clearChat();
-    addSystemMessage("You're now connected! Say hello.");
-    showRemoteOverlay(true, "Connecting video...");
-    cleanupPeerConnection();
-    if (msg.initiator) {
-      await startAsInitiator();
-    } else {
-      createPeerConnection(false);
-    }
-  } else if (msg.type === "signal") {
-    await handleSignal(msg.data);
-  } else if (msg.type === "partner-left") {
-    if (!isMatched && !started) return;
-    cleanupPeerConnection();
-    isMatched = false;
-    setControlsEnabled(false);
-    addSystemMessage("Stranger disconnected. Finding someone new...");
-    setStatus("waiting", "Searching...");
-    showRemoteOverlay(true, "Finding someone new...");
-    await rtc("join");
+  switch (msg.type) {
+    case "matched":
+      await onMatched(msg.initiator);
+      break;
+    case "waiting":
+      showWaitingRoom(msg.waitingCount || msg.position || 1);
+      break;
+    case "signal":
+      await handleSignal(msg.data, sessionId);
+      break;
+    case "typing":
+      typingIndicator.hidden = !msg.value;
+      break;
+    case "chat":
+      addChatMessage(msg.text, "received");
+      typingIndicator.hidden = true;
+      break;
+    case "partner-left":
+      cleanupPeerConnection();
+      isMatched = false;
+      isConnecting = false;
+      setControlsEnabled(false);
+      addSystemMessage("Stranger has disconnected.");
+      showWaitingRoom(1);
+      showRemoteOverlay(true, "Partner left — waiting for someone new...");
+      await rtc("join");
+      break;
   }
 }
 
@@ -311,17 +387,32 @@ async function startChat() {
   if (started) return;
   try {
     await getLocalMedia();
-  } catch {
+  } catch (err) {
+    console.error("Media error:", err);
+    addSystemMessage("Could not access camera/microphone. Check browser permissions.");
+    setStatus("error", "Camera/mic denied");
     return;
   }
+
   started = true;
   startBtn.disabled = true;
   clearChat();
-  addSystemMessage("Looking for someone to chat with...");
-  setStatus("waiting", "Searching...");
+  addSystemMessage("Looking for someone you can chat with...");
+  showWaitingRoom(1);
   showRemoteOverlay(true, "Looking for someone...");
-  await rtc("join");
-  pollLoop();
+
+  const res = await rtc("join");
+  if (res?.status === "matched") {
+    await onMatched(res.initiator ?? false);
+    const more = await rtc("poll");
+    if (more?.messages) {
+      for (const m of more.messages) await handleServerMessage(m);
+    }
+  } else if (res?.status === "waiting") {
+    showWaitingRoom(res.position || 1);
+  }
+
+  startPolling();
 }
 
 async function handleNext() {
@@ -329,18 +420,25 @@ async function handleNext() {
   isMatched = false;
   setControlsEnabled(false);
   clearChat();
-  addSystemMessage("Finding a new person...");
-  setStatus("waiting", "Searching...");
+  addSystemMessage("Looking for someone you can chat with...");
+  showWaitingRoom(1);
   showRemoteOverlay(true, "Looking for someone...");
-  await rtc("next");
+  setStatus("waiting", "Searching...");
+
+  const res = await rtc("next");
+  if (res?.status === "matched") {
+    const pollRes = await rtc("poll");
+    if (pollRes?.messages) {
+      for (const m of pollRes.messages) await handleServerMessage(m);
+    }
+  }
 }
 
-// ---- Network banner (shown only when serving over a LAN address) ----
 function renderNetworkBanner() {
   const host = location.hostname;
   const isLan =
     /^(\d{1,3}\.){3}\d{1,3}$/.test(host) &&
-    (host.startsWith("192.168.") || host.startsWith("10.") || host.startsWith("172."));
+    (host.startsWith("192.168.") || host.startsWith("10.") || /^172\.(1[6-9]|2\d|3[01])\./.test(host));
   if (!isLan) return;
   networkBanner.hidden = false;
   networkUrls.innerHTML = "";
@@ -378,24 +476,29 @@ cameraBtn.addEventListener("click", () => {
   cameraBtn.querySelector(".btn-icon").textContent = isCameraOff ? "📷" : "🎥";
 });
 
-chatForm.addEventListener("submit", (e) => {
+chatForm.addEventListener("submit", async (e) => {
   e.preventDefault();
   const text = chatInput.value.trim();
   if (!text || !isMatched) return;
-  if (sendOverChannel({ kind: "chat", text })) {
+
+  const res = await rtc("chat", { text });
+  if (res?.ok) {
     addChatMessage(text, "sent");
     chatInput.value = "";
+  } else {
+    addSystemMessage("Message failed to send — try again.");
   }
 });
 
 chatInput.addEventListener("input", () => {
   if (!isMatched) return;
-  sendOverChannel({ kind: "typing", value: true });
+  rtc("chat", { text: "__typing__" }).catch(() => {});
   clearTimeout(typingTimeout);
-  typingTimeout = setTimeout(() => sendOverChannel({ kind: "typing", value: false }), 1000);
+  typingTimeout = setTimeout(() => {}, 1000);
 });
 
 window.addEventListener("beforeunload", () => {
+  stopPolling();
   const payload = JSON.stringify({ action: "leave", id: clientId });
   if (navigator.sendBeacon) {
     navigator.sendBeacon("/api/rtc", new Blob([payload], { type: "application/json" }));

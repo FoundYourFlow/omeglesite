@@ -3,15 +3,15 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Local Chat</title>
+  <title>Omegle</title>
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
-  <div class="app">
-    <header class="header">
-      <div class="logo">
-        <span class="logo-icon">◉</span>
-        <h1>Local Chat</h1>
+  <div class="omegle">
+    <header class="masthead">
+      <div class="brand">
+        <h1 class="logo">Omegle</h1>
+        <span class="tagline">Talk to strangers!</span>
       </div>
       <div class="status" id="status">
         <span class="status-dot"></span>
@@ -24,62 +24,69 @@
       <div class="network-urls" id="network-urls"></div>
     </div>
 
-    <main class="main">
-      <section class="video-section">
+    <div class="waiting-banner" id="waiting-banner" hidden>
+      <div class="waiting-content">
+        <div class="spinner"></div>
+        <div>
+          <strong>Waiting room</strong>
+          <p id="waiting-text">Looking for someone to pair you with...</p>
+        </div>
+      </div>
+    </div>
+
+    <main class="stage">
+      <section class="video-col">
         <div class="video-container remote">
           <video id="remote-video" autoplay playsinline></video>
           <div class="video-overlay" id="remote-overlay">
             <div class="overlay-content">
               <div class="spinner"></div>
-              <p id="remote-status">Click Start to find someone</p>
+              <p id="remote-status">Press Start to find a stranger</p>
             </div>
           </div>
-          <span class="video-label">Stranger</span>
+          <span class="video-tag stranger-tag">Stranger</span>
         </div>
 
         <div class="video-container local">
           <video id="local-video" autoplay playsinline muted></video>
           <div class="video-overlay hidden" id="local-overlay">
-            <p>Camera off</p>
+            <div class="overlay-content"><p>Camera off</p></div>
           </div>
-          <span class="video-label">You</span>
+          <span class="video-tag">You</span>
+          <div class="media-controls">
+            <button class="media-btn" id="mute-btn" disabled title="Mute microphone">🎤</button>
+            <button class="media-btn" id="camera-btn" disabled title="Turn camera off">🎥</button>
+          </div>
         </div>
       </section>
 
-      <aside class="chat-section">
-        <div class="chat-header">
-          <h2>Messages</h2>
-          <span class="typing-indicator" id="typing-indicator" hidden>typing...</span>
-        </div>
+      <section class="chat-col">
         <div class="chat-messages" id="chat-messages">
-          <div class="system-message">Welcome! Press Start to connect with someone on your network.</div>
+          <div class="system-message">You're not chatting with anyone. Press <b>Start</b> to meet a stranger.</div>
         </div>
-        <form class="chat-input-form" id="chat-form">
-          <input
-            type="text"
-            id="chat-input"
-            placeholder="Type a message..."
-            autocomplete="off"
-            disabled
-          >
-          <button type="submit" id="send-btn" disabled>Send</button>
-        </form>
-      </aside>
+        <div class="typing-row">
+          <span class="typing-indicator" id="typing-indicator" hidden>Stranger is typing...</span>
+        </div>
+      </section>
+
+      <form class="convo-bar" id="chat-form">
+        <div class="action-cell">
+          <button type="button" class="action-btn start" id="start-btn">Start</button>
+          <button type="button" class="action-btn new" id="next-btn" disabled>New</button>
+        </div>
+        <input
+          type="text"
+          id="chat-input"
+          placeholder="Type a message and press Send..."
+          autocomplete="off"
+          disabled
+        >
+        <button type="submit" class="send-btn" id="send-btn" disabled>Send</button>
+      </form>
     </main>
 
-    <footer class="controls">
-      <button class="btn btn-primary" id="start-btn">
-        <span class="btn-icon">▶</span> Start
-      </button>
-      <button class="btn btn-secondary" id="next-btn" disabled>
-        <span class="btn-icon">⏭</span> Next
-      </button>
-      <button class="btn btn-secondary" id="mute-btn" disabled>
-        <span class="btn-icon">🎤</span> Mute
-      </button>
-      <button class="btn btn-secondary" id="camera-btn" disabled>
-        <span class="btn-icon">🎥</span> Camera
-      </button>
+    <footer class="site-footer">
+      <span>Omegle-style random chat &middot; video + text</span>
     </footer>
   </div>
 
