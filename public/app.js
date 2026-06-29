@@ -36,14 +36,17 @@ let isCameraOff = false;
 let started = false;
 let isMatched = false;
 let isWaiting = false;
+let isInitiator = false;
 let pollTimer = null;
 let typingTimeout = null;
 let sessionId = 0;
+let iceRestartTries = 0;
 
 const ICE_SERVERS = {
   iceServers: [
     { urls: "stun:stun.l.google.com:19302" },
     { urls: "stun:stun1.l.google.com:19302" },
+    { urls: "stun:openrelay.metered.ca:80" },
     {
       urls: "turn:openrelay.metered.ca:80",
       username: "openrelayproject",
@@ -54,11 +57,19 @@ const ICE_SERVERS = {
       username: "openrelayproject",
       credential: "openrelayproject",
     },
+    {
+      urls: "turn:openrelay.metered.ca:443?transport=tcp",
+      username: "openrelayproject",
+      credential: "openrelayproject",
+    },
   ],
 };
 
-const POLL_WAITING_MS = 700;
-const POLL_MATCHED_MS = 250;
+// Adaptive polling: fast while establishing the WebRTC connection,
+// slower once connected (chat/keepalive) or idle in the queue.
+const POLL_WAITING_MS = 900;
+const POLL_CONNECTING_MS = 200;
+const POLL_CONNECTED_MS = 1000;
 
 // ---- Server transport ----
 async function rtc(action, extra = {}) {
@@ -76,25 +87,42 @@ async function rtc(action, extra = {}) {
   }
 }
 
-function schedulePoll(delay) {
-  clearTimeout(pollTimer);
-  pollTimer = setTimeout(pollOnce, delay);
+function nextPollDelay() {
+  if (!isMatched) return POLL_WAITING_MS;
+  const state = peerConnection && peerConnection.connectionState;
+  if (state === "connected") return POLL_CONNECTED_MS;
+  return POLL_CONNECTING_MS;
 }
 
+function schedulePoll(delay) {
+  clearTimeout(pollTimer);
+  pollTimer = setTimeout(pollOnce, delay != null ? delay : nextPollDelay());
+}
+
+let polling = false;
 async function pollOnce() {
-  if (!started) return;
-  const res = await rtc("poll");
-  if (res) {
-    if (res.status === "waiting") showWaitingRoom(res.waitingCount);
-    else if (res.status === "matched") hideWaitingRoom();
-    if (Array.isArray(res.messages)) {
-      for (const msg of res.messages) {
-        await handleServerMessage(msg);
+  if (!started || polling) return;
+  polling = true;
+  try {
+    const res = await rtc("poll");
+    if (res) {
+      if (res.status === "waiting" && !isMatched) showWaitingRoom(res.waitingCount);
+      else if (res.status === "matched") hideWaitingRoom();
+      if (Array.isArray(res.messages)) {
+        for (const msg of res.messages) {
+          await handleServerMessage(msg);
+        }
       }
     }
+  } finally {
+    polling = false;
+    schedulePoll();
   }
-  const delay = isMatched ? POLL_MATCHED_MS : POLL_WAITING_MS;
-  schedulePoll(delay);
+}
+
+// Trigger an extra poll very soon without disturbing the steady loop.
+function pollSoon() {
+  schedulePoll(60);
 }
 
 function startPolling() {
@@ -207,7 +235,9 @@ function serializeCandidate(c) {
 
 async function sendSignal(data) {
   await rtc("signal", { data });
-  schedulePoll(POLL_MATCHED_MS);
+  // Don't reset the main poll timer here (that would starve the receive
+  // path while ICE candidates trickle). Just nudge an extra quick poll.
+  pollSoon();
 }
 
 // ---- WebRTC ----
@@ -240,19 +270,42 @@ function createPeerConnection(initiator, mySession) {
     if (mySession !== sessionId || !peerConnection) return;
     const state = peerConnection.connectionState;
     if (state === "connected") {
+      iceRestartTries = 0;
       showRemoteOverlay(false);
     } else if (state === "failed") {
-      showRemoteOverlay(true, "Video connection failed — chat still works");
+      tryIceRestart(mySession);
     }
   };
 
   peerConnection.oniceconnectionstatechange = () => {
     if (mySession !== sessionId || !peerConnection) return;
     const s = peerConnection.iceConnectionState;
-    if (s === "connected" || s === "completed") showRemoteOverlay(false);
+    if (s === "connected" || s === "completed") {
+      iceRestartTries = 0;
+      showRemoteOverlay(false);
+    } else if (s === "failed") {
+      tryIceRestart(mySession);
+    }
   };
 
   return peerConnection;
+}
+
+async function tryIceRestart(mySession) {
+  if (mySession !== sessionId || !peerConnection) return;
+  if (!isInitiator) return; // only one side restarts to avoid glare
+  if (iceRestartTries >= 2) {
+    showRemoteOverlay(true, "Video connection failed — chat still works");
+    return;
+  }
+  iceRestartTries += 1;
+  try {
+    const offer = await peerConnection.createOffer({ iceRestart: true });
+    await peerConnection.setLocalDescription(offer);
+    await sendSignal({ type: "offer", sdp: serializeSdp(offer) });
+  } catch (err) {
+    console.warn("ICE restart failed:", err);
+  }
 }
 
 function cleanupPeerConnection() {
@@ -286,28 +339,42 @@ async function flushCandidates() {
 async function handleSignal(data, mySession) {
   if (!peerConnection || mySession !== sessionId || !data) return;
 
-  if (data.type === "offer") {
-    await peerConnection.setRemoteDescription(data.sdp);
-    remoteDescSet = true;
-    await flushCandidates();
-    const answer = await peerConnection.createAnswer();
-    await peerConnection.setLocalDescription(answer);
-    await sendSignal({ type: "answer", sdp: serializeSdp(answer) });
-  } else if (data.type === "answer") {
-    await peerConnection.setRemoteDescription(data.sdp);
-    remoteDescSet = true;
-    await flushCandidates();
-  } else if (data.type === "ice" && data.candidate) {
-    const cand = data.candidate;
-    if (remoteDescSet) {
-      try {
-        await peerConnection.addIceCandidate(cand);
-      } catch (err) {
-        console.warn("ICE add error:", err);
+  try {
+    if (data.type === "offer") {
+      const state = peerConnection.signalingState;
+      // Accept an offer when stable (initial) or as an ICE-restart offer.
+      // Ignore if we're mid-negotiation in a conflicting state.
+      if (state !== "stable" && state !== "have-remote-offer") {
+        return;
       }
-    } else {
-      pendingCandidates.push(cand);
+      await peerConnection.setRemoteDescription(data.sdp);
+      remoteDescSet = true;
+      await flushCandidates();
+      const answer = await peerConnection.createAnswer();
+      await peerConnection.setLocalDescription(answer);
+      await sendSignal({ type: "answer", sdp: serializeSdp(answer) });
+    } else if (data.type === "answer") {
+      // Only valid right after we sent an offer. Drop duplicates/stale.
+      if (peerConnection.signalingState !== "have-local-offer") {
+        return;
+      }
+      await peerConnection.setRemoteDescription(data.sdp);
+      remoteDescSet = true;
+      await flushCandidates();
+    } else if (data.type === "ice" && data.candidate) {
+      const cand = data.candidate;
+      if (remoteDescSet && peerConnection.remoteDescription) {
+        try {
+          await peerConnection.addIceCandidate(cand);
+        } catch (err) {
+          console.warn("ICE add error:", err);
+        }
+      } else {
+        pendingCandidates.push(cand);
+      }
     }
+  } catch (err) {
+    console.warn("handleSignal error:", data.type, err);
   }
 }
 
@@ -326,25 +393,26 @@ async function onMatched(initiator) {
   if (isConnecting || (isMatched && peerConnection)) return;
   isConnecting = true;
   try {
+    cleanupPeerConnection();
     const mySession = ++sessionId;
+    isInitiator = !!initiator;
+    iceRestartTries = 0;
+
     hideWaitingRoom();
     isMatched = true;
     isWaiting = false;
     setStatus("matched", "Connected to a stranger");
     setControlsEnabled(true);
-  clearChat();
-  addSystemMessage("You're now chatting with a random stranger. Say hi!");
-  showRemoteOverlay(true, "Connecting video...");
-
-    cleanupPeerConnection();
-    sessionId = mySession;
+    clearChat();
+    addSystemMessage("You're now chatting with a random stranger. Say hi!");
+    showRemoteOverlay(true, "Connecting video...");
 
     if (initiator) {
       await startAsInitiator(mySession);
     } else {
       createPeerConnection(false, mySession);
     }
-    schedulePoll(POLL_MATCHED_MS);
+    pollSoon();
   } finally {
     isConnecting = false;
   }
@@ -374,11 +442,13 @@ async function handleServerMessage(msg) {
       cleanupPeerConnection();
       isMatched = false;
       isConnecting = false;
+      isInitiator = false;
       setControlsEnabled(false);
       addSystemMessage("Stranger has disconnected.");
       showWaitingRoom(1);
-      showRemoteOverlay(true, "Partner left — waiting for someone new...");
-      await rtc("join");
+      showRemoteOverlay(true, "Partner left — finding someone new...");
+      // The poll loop will re-matchmake automatically; nudge it to be quick.
+      pollSoon();
       break;
   }
 }
@@ -401,23 +471,17 @@ async function startChat() {
   showWaitingRoom(1);
   showRemoteOverlay(true, "Looking for someone...");
 
-  const res = await rtc("join");
-  if (res?.status === "matched") {
-    await onMatched(res.initiator ?? false);
-    const more = await rtc("poll");
-    if (more?.messages) {
-      for (const m of more.messages) await handleServerMessage(m);
-    }
-  } else if (res?.status === "waiting") {
-    showWaitingRoom(res.position || 1);
-  }
-
+  await rtc("join");
+  // Always drive everything through the single poll loop. It will deliver the
+  // "matched" message (and any signaling) in order, avoiding double-handling.
   startPolling();
 }
 
 async function handleNext() {
   cleanupPeerConnection();
   isMatched = false;
+  isConnecting = false;
+  isInitiator = false;
   setControlsEnabled(false);
   clearChat();
   addSystemMessage("Looking for someone you can chat with...");
@@ -425,13 +489,9 @@ async function handleNext() {
   showRemoteOverlay(true, "Looking for someone...");
   setStatus("waiting", "Searching...");
 
-  const res = await rtc("next");
-  if (res?.status === "matched") {
-    const pollRes = await rtc("poll");
-    if (pollRes?.messages) {
-      for (const m of pollRes.messages) await handleServerMessage(m);
-    }
-  }
+  await rtc("next");
+  // Let the poll loop deliver the next match; nudge it to run promptly.
+  pollSoon();
 }
 
 function renderNetworkBanner() {
