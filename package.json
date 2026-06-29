@@ -1,0 +1,16 @@
+{
+  "name": "omeglesite",
+  "version": "1.0.0",
+  "description": "Omegle-style random video + text chat. Works on a local network or deployed on Vercel.",
+  "private": true,
+  "scripts": {
+    "dev": "node dev-server.js",
+    "vercel-dev": "vercel dev"
+  },
+  "dependencies": {
+    "@upstash/redis": "^1.34.3"
+  },
+  "devDependencies": {
+    "express": "^4.21.2"
+  }
+}

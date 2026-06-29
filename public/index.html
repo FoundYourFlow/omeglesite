@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Local Chat</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="app">
+    <header class="header">
+      <div class="logo">
+        <span class="logo-icon">◉</span>
+        <h1>Local Chat</h1>
+      </div>
+      <div class="status" id="status">
+        <span class="status-dot"></span>
+        <span id="status-text">Connecting...</span>
+      </div>
+    </header>
+
+    <div class="network-banner" id="network-banner" hidden>
+      <p>Share this link with anyone on your network:</p>
+      <div class="network-urls" id="network-urls"></div>
+    </div>
+
+    <main class="main">
+      <section class="video-section">
+        <div class="video-container remote">
+          <video id="remote-video" autoplay playsinline></video>
+          <div class="video-overlay" id="remote-overlay">
+            <div class="overlay-content">
+              <div class="spinner"></div>
+              <p id="remote-status">Click Start to find someone</p>
+            </div>
+          </div>
+          <span class="video-label">Stranger</span>
+        </div>
+
+        <div class="video-container local">
+          <video id="local-video" autoplay playsinline muted></video>
+          <div class="video-overlay hidden" id="local-overlay">
+            <p>Camera off</p>
+          </div>
+          <span class="video-label">You</span>
+        </div>
+      </section>
+
+      <aside class="chat-section">
+        <div class="chat-header">
+          <h2>Messages</h2>
+          <span class="typing-indicator" id="typing-indicator" hidden>typing...</span>
+        </div>
+        <div class="chat-messages" id="chat-messages">
+          <div class="system-message">Welcome! Press Start to connect with someone on your network.</div>
+        </div>
+        <form class="chat-input-form" id="chat-form">
+          <input
+            type="text"
+            id="chat-input"
+            placeholder="Type a message..."
+            autocomplete="off"
+            disabled
+          >
+          <button type="submit" id="send-btn" disabled>Send</button>
+        </form>
+      </aside>
+    </main>
+
+    <footer class="controls">
+      <button class="btn btn-primary" id="start-btn">
+        <span class="btn-icon">▶</span> Start
+      </button>
+      <button class="btn btn-secondary" id="next-btn" disabled>
+        <span class="btn-icon">⏭</span> Next
+      </button>
+      <button class="btn btn-secondary" id="mute-btn" disabled>
+        <span class="btn-icon">🎤</span> Mute
+      </button>
+      <button class="btn btn-secondary" id="camera-btn" disabled>
+        <span class="btn-icon">🎥</span> Camera
+      </button>
+    </footer>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
