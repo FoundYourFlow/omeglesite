@@ -8,7 +8,7 @@
     "vercel-dev": "vercel dev"
   },
   "dependencies": {
-    "@upstash/redis": "^1.34.3"
+    "@supabase/supabase-js": "^2.49.1"
   },
   "devDependencies": {
     "express": "^4.21.2"

@@ -1,16 +1,15 @@
 # omeglesite
 
 An Omegle-style random chat app with **live video** and **text chat**. Two strangers are
-randomly paired; either can hit **Next** to meet someone new.
+randomly paired; either can hit **New** to meet someone new.
 
 It runs in two places:
 
-- **Locally / on your LAN** — `npm run dev`
-- **Online, deployed on Vercel** — serverless functions handle matchmaking & signaling
+- **Locally / on your LAN** — `npm run dev` (no database needed)
+- **Online on Vercel** — serverless functions + **Supabase** (free tier) for shared state
 
-Video and audio are sent **peer-to-peer over WebRTC** (they never touch the server). The
-server is only used to pair people and relay the small WebRTC "handshake" messages. Text
-chat travels over a WebRTC data channel, so it's also peer-to-peer.
+Video and audio are **peer-to-peer over WebRTC**. The server only pairs people, relays
+signaling, and delivers chat messages.
 
 ## Run locally
 
@@ -19,56 +18,52 @@ npm install
 npm run dev
 ```
 
-Open `http://localhost:3000` in two browser tabs (or share the printed `Network` URL with
-another device on your Wi‑Fi), click **Start** in both, and you'll be paired.
+Open `http://localhost:3000` in two browser tabs, click **Start** in both, and you'll be paired.
+No Supabase setup required for local dev — it uses in-memory storage automatically.
 
-> Browsers only allow camera/mic on `https://` or `localhost`. On the LAN URL (plain
-> `http://192.168.x.x`) some browsers block the camera. For LAN testing use two tabs on the
-> host machine, or deploy to Vercel (HTTPS) for real cross-device use.
+## Deploy to Vercel + Supabase (free)
 
-## Deploy to Vercel (works online)
+### 1. Create a Supabase project (free)
 
-Because Vercel is **serverless**, it can't run a long-lived WebSocket server. This project is
-built for that: matchmaking/signaling live in `api/rtc.js` and share state through a small
-**Upstash Redis** store (the Vercel-recommended replacement for the old Vercel KV).
+1. Go to [supabase.com](https://supabase.com) → **Start your project** → create a new project.
+2. Open **SQL Editor** → **New query**, paste the contents of `supabase/schema.sql`, and **Run**.
+3. Go to **Project Settings → API** and copy:
+   - **Project URL** → `SUPABASE_URL`
+   - **service_role** key (under "Project API keys") → `SUPABASE_SERVICE_ROLE_KEY`
+   
+   > Use the **service_role** key on Vercel only — never put it in frontend code.
 
-1. Push this repo to GitHub (already done if you cloned from GitHub).
-2. Go to [vercel.com](https://vercel.com) → **Add New → Project** → import this repo.
-3. In the project, open **Storage → Create Database → Upstash for Redis** (from the Marketplace)
-   and connect it to the project. This auto-adds the `KV_REST_API_URL` / `KV_REST_API_TOKEN`
-   (a.k.a. `UPSTASH_REDIS_REST_URL` / `UPSTASH_REDIS_REST_TOKEN`) env vars.
-4. **Redeploy** (Deployments → ⋯ → Redeploy) so the functions pick up the Redis variables.
-5. Open your `*.vercel.app` URL on two devices, click **Start**, and you're connected.
+### 2. Deploy on Vercel
 
-Or deploy from the CLI:
+1. Go to [vercel.com/new](https://vercel.com/new) → import **FoundYourFlow/omeglesite**.
+2. Before deploying, add **Environment Variables**:
+   - `SUPABASE_URL` = your project URL
+   - `SUPABASE_SERVICE_ROLE_KEY` = your service role key
+3. Click **Deploy**.
 
-```bash
-npm i -g vercel
-vercel            # link & deploy a preview
-vercel --prod     # production deploy
-```
+Every push to `main` auto-deploys if the repo is linked to Vercel.
 
-> **Without Redis** the app still deploys and may work when both users happen to hit the same
-> warm function instance, but matchmaking is unreliable. **Add Upstash Redis for correct
-> multi-user behavior.**
+### 3. Test
+
+Open your `*.vercel.app` URL on two devices, click **Start**, and you're connected.
 
 ## How it works
 
 ```
 Browser A  ──(HTTP poll /api/rtc)──►  Vercel function ◄──(HTTP poll /api/rtc)── Browser B
-     │                               (Vercel KV: queue,                              │
-     │                                mailboxes, pairings)                           │
-     └────────────────  WebRTC peer-to-peer video / audio / chat  ──────────────────┘
+     │                               (Supabase: queue,                               │
+     │                                mailboxes, pairings)                            │
+     └────────────────  WebRTC peer-to-peer video / audio  ──────────────────────────┘
 ```
 
-- `api/rtc.js` — single endpoint with actions: `join`, `poll`, `signal`, `leave`, `next`.
+- `api/rtc.js` — single endpoint: `join`, `poll`, `signal`, `chat`, `leave`, `next`.
 - `lib/matchmaker.js` — queueing, pairing, mailboxes, liveness via heartbeats.
-- `lib/store.js` — Upstash Redis in production, in-memory for local dev.
-- `public/` — the UI (`index.html`, `style.css`, `app.js`).
+- `lib/store.js` — Supabase Postgres in production, in-memory for local dev.
+- `supabase/schema.sql` — two small tables (`store_kv`, `store_list`).
+- `public/` — Omegle-style UI.
 
 ## Connectivity note
 
-WebRTC needs a TURN server to connect peers behind strict/symmetric NATs. Free public STUN +
-best-effort TURN servers are configured in `public/app.js`. For guaranteed cross-network
-connectivity, plug in your own TURN credentials (e.g. Twilio, Metered, or a self-hosted
-coturn) in the `ICE_SERVERS` config.
+WebRTC needs STUN/TURN for peers on different networks. Free public servers are configured
+in `public/app.js`. For guaranteed connectivity across strict NATs, add your own TURN
+credentials (Twilio, Metered, or self-hosted coturn).
